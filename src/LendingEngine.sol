@@ -8,7 +8,6 @@ pragma solidity 0.8.36;
  * @notice A simple lending engine for managing collateral and borrowing
  */
 contract LendingEngine {
-    
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -60,7 +59,11 @@ contract LendingEngine {
             revert LendingEngine__MaxWithdrawAmountExceeded();
         }
         s_positions[msg.sender].collateral -= amount;
-        s_totalCollateral -= amount;
+
+        // Logic fault (Only reduce protocol totalCollateral when the withdrawing user has no outstanding debt)
+        if (s_positions[msg.sender].debt == 0) {
+            s_totalCollateral -= amount;
+        }
 
         uint256 newMaxBorrowAmount = _getMaxBorrowAmount(msg.sender);
         if (s_positions[msg.sender].debt > newMaxBorrowAmount) {
