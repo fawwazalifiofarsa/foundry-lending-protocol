@@ -13,20 +13,6 @@ import {IRebaseToken} from "./interfaces/IRebaseToken.sol";
  */
 contract Vault {
     /*//////////////////////////////////////////////////////////////
-                                ERRORS
-    //////////////////////////////////////////////////////////////*/
-
-    error Vault__NeedsMoreThanZero();
-    error Vault__WithdrawFailed();
-
-    /*//////////////////////////////////////////////////////////////
-                                EVENTS
-    //////////////////////////////////////////////////////////////*/
-
-    event Deposit(address indexed user, uint256 amount);
-    event Withdraw(address indexed user, uint256 amount);
-
-    /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
 
@@ -57,6 +43,20 @@ contract Vault {
     uint256 private constant RATE_SLOPE = 10e16; // 10%
     // Portion of borrower interest reserved for the protocol
     uint256 private constant RESERVE_FACTOR = 10e16; // 10%
+
+    /*//////////////////////////////////////////////////////////////
+                                EVENTS
+    //////////////////////////////////////////////////////////////*/
+
+    event Deposit(address indexed user, uint256 amount);
+    event Withdraw(address indexed user, uint256 amount);
+
+    /*//////////////////////////////////////////////////////////////
+                                ERRORS
+    //////////////////////////////////////////////////////////////*/
+
+    error Vault__NeedsMoreThanZero();
+    error Vault__WithdrawFailed();
 
     /*//////////////////////////////////////////////////////////////
                                 MODIFIERS
