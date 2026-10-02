@@ -4,6 +4,7 @@ pragma solidity 0.8.36;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IRebaseToken} from "./interfaces/IRebaseToken.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title Vault
@@ -11,7 +12,7 @@ import {IRebaseToken} from "./interfaces/IRebaseToken.sol";
  * @notice Manages lender liquidity for a single underlying asset and tracks interest generated from borrowing activity
  * @dev Accepts underlying token deposits, mints and burns the corresponding RebaseToken, tracks utilization, and maintains borrow and liquidity indexes for interest accrual.
  */
-contract Vault {
+contract Vault is Ownable {
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
@@ -44,6 +45,8 @@ contract Vault {
     // Portion of borrower interest reserved for the protocol
     uint256 private constant RESERVE_FACTOR = 10e16; // 10%
 
+    address public lendingEngine;
+
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -57,6 +60,10 @@ contract Vault {
 
     error Vault__NeedsMoreThanZero();
     error Vault__WithdrawFailed();
+    error Vault__OnlyLendingEngine();
+    error Vault__InvalidAddress();
+    error Vault__LendingEngineAlreadySet();
+    error Vault__TransferFailed();
 
     /*//////////////////////////////////////////////////////////////
                                 MODIFIERS
@@ -73,6 +80,13 @@ contract Vault {
         _;
     }
 
+    modifier onlyLendingEngine() {
+        if (msg.sender != lendingEngine) {
+            revert Vault__OnlyLendingEngine();
+        }
+        _;
+    }
+
     /*//////////////////////////////////////////////////////////////
                                 CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -82,7 +96,10 @@ contract Vault {
      * @param _underlyingToken The address of the underlying ERC-20 token
      * @param _rebaseToken The address of the corresponding rebase token
      */
-    constructor(address _underlyingToken, address _rebaseToken) {
+    constructor(
+        address _underlyingToken,
+        address _rebaseToken
+    ) Ownable(msg.sender) {
         i_underlyingToken = IERC20(_underlyingToken);
         i_rebaseToken = IRebaseToken(_rebaseToken);
 
@@ -94,6 +111,22 @@ contract Vault {
     /*//////////////////////////////////////////////////////////////
                             EXTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
+
+    /**
+     * @notice Initializes address of the LendingEngine contract for one time by the deployer
+     * @param _lendingEngine The address of the LendingEngine contract
+     */
+    function setLendingEngine(address _lendingEngine) external onlyOwner {
+        if (_lendingEngine == address(0)) {
+            revert Vault__InvalidAddress();
+        }
+
+        if (lendingEngine != address(0)) {
+            revert Vault__LendingEngineAlreadySet();
+        }
+
+        lendingEngine = _lendingEngine;
+    }
 
     /**
      * @notice Allow users to deposit USDC/USDT into the vault and mint the correlated rebase token in return
@@ -134,6 +167,55 @@ contract Vault {
         return address(i_rebaseToken);
     }
 
+    /**
+     * @notice Borrows underlying tokens on behalf of a user
+     * @param _to The address of the borrower
+     * @param _amount The amount of tokens to borrow
+     * @return scaledAmount The scaled amount of debt created
+     */
+    function borrow(
+        address _to,
+        uint256 _amount
+    ) external onlyLendingEngine returns (uint256 scaledAmount) {
+        _accrueInterest();
+
+        scaledAmount = (_amount * WAD) / borrowIndex;
+        totalScaledBorrowed += scaledAmount;
+        bool success = i_underlyingToken.transfer(_to, _amount);
+        if (!success) {
+            revert Vault__TransferFailed();
+        }
+
+        _updateInterestRates();
+    }
+
+    /**
+     * @notice Repays borrowed tokens on behalf of a user
+     * @param _payer The address of the payer
+     * @param _amount The amount of tokens to repay
+     * @return scaledAmount The scaled amount of debt repaid
+     */
+    function repay(
+        address _payer,
+        uint256 _amount
+    ) external onlyLendingEngine returns (uint256 scaledAmount) {
+        _accrueInterest();
+
+        scaledAmount = (_amount * WAD) / borrowIndex;
+        totalScaledBorrowed -= scaledAmount;
+        i_underlyingToken.transferFrom(_payer, address(this), _amount);
+
+        _updateInterestRates();
+    }
+
+    /**
+     * @notice Accrues interest into the borrow and liquidity indexes
+     * @dev Can be called by the LendingEngine to ensure indexes are up-to-date before borrowing or repaying
+     */
+    function accrueInterest() external onlyLendingEngine {
+        _accrueInterest();
+    }
+
     /*//////////////////////////////////////////////////////////////
                             PUBLIC FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -167,6 +249,22 @@ contract Vault {
         if (totalLiquidity == 0) return 0;
 
         return (borrowed * WAD) / totalLiquidity;
+    }
+
+    /**
+     * @notice Returns the current borrow rate based on vault utilization
+     * @return The annual borrow rate expressed in WAD precision
+     */
+    function previewBorrowIndex() public view returns (uint256) {
+        uint256 elapsed = block.timestamp - lastUpdateTimestamp;
+
+        if (elapsed == 0) {
+            return borrowIndex;
+        }
+
+        uint256 borrowFactor = WAD + (currentBorrowRate * elapsed) / 365 days;
+
+        return (borrowIndex * borrowFactor) / WAD;
     }
 
     /*//////////////////////////////////////////////////////////////
