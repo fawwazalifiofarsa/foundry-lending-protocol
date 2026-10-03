@@ -176,7 +176,12 @@ contract Vault is Ownable {
     function borrow(
         address _to,
         uint256 _amount
-    ) external onlyLendingEngine returns (uint256 scaledAmount) {
+    )
+        external
+        onlyLendingEngine
+        moreThanZero(_amount)
+        returns (uint256 scaledAmount)
+    {
         _accrueInterest();
 
         scaledAmount = (_amount * WAD) / borrowIndex;
@@ -198,7 +203,12 @@ contract Vault is Ownable {
     function repay(
         address _payer,
         uint256 _amount
-    ) external onlyLendingEngine returns (uint256 scaledAmount) {
+    )
+        external
+        onlyLendingEngine
+        moreThanZero(_amount)
+        returns (uint256 scaledAmount)
+    {
         _accrueInterest();
 
         scaledAmount = (_amount * WAD) / borrowIndex;
