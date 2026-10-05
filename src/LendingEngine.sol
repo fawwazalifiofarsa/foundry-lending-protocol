@@ -166,6 +166,10 @@ contract LendingEngine {
         return s_positions[user].collateral;
     }
 
+    /*//////////////////////////////////////////////////////////////
+                            PUBLIC FUNCTIONS
+    //////////////////////////////////////////////////////////////*/
+
     /**
      * @notice Returns the outstanding debt of a user
      * @param _user The address whose debt is queried
@@ -176,10 +180,6 @@ contract LendingEngine {
             (s_positions[_user].scaledDebt * i_usdcVault.previewBorrowIndex()) /
             WAD;
     }
-
-    /*//////////////////////////////////////////////////////////////
-                            PUBLIC FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
 
     /**
      * @notice Returns the USD value of a given amount of ETH
