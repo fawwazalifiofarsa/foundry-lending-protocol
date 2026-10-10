@@ -5,6 +5,7 @@ pragma solidity 0.8.36;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IRebaseToken} from "./interfaces/IRebaseToken.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @title Vault
@@ -45,6 +46,8 @@ contract Vault is Ownable {
     // Portion of borrower interest reserved for the protocol
     uint256 private constant RESERVE_FACTOR = 10e16; // 10%
 
+    uint256 private constant MIN_DEPOSIT_AMOUNT = 10e6;
+
     address public lendingEngine;
 
     /*//////////////////////////////////////////////////////////////
@@ -59,6 +62,7 @@ contract Vault is Ownable {
     //////////////////////////////////////////////////////////////*/
 
     error Vault__NeedsMoreThanZero();
+    error Vault__NeedsMoreThanMinimumAmount();
     error Vault__WithdrawFailed();
     error Vault__OnlyLendingEngine();
     error Vault__InvalidAddress();
@@ -133,6 +137,10 @@ contract Vault is Ownable {
      * @param _amount The amount of underlying tokens to deposit
      */
     function deposit(uint256 _amount) external moreThanZero(_amount) {
+        if (_amount < MIN_DEPOSIT_AMOUNT) {
+            revert Vault__NeedsMoreThanMinimumAmount();
+        }
+
         _accrueInterest();
 
         bool success = i_underlyingToken.transferFrom(
@@ -191,7 +199,12 @@ contract Vault is Ownable {
     {
         _accrueInterest();
 
-        scaledAmount = (_amount * WAD) / borrowIndex;
+        scaledAmount = Math.mulDiv(
+            _amount,
+            WAD,
+            borrowIndex,
+            Math.Rounding.Ceil
+        );
         totalScaledBorrowed += scaledAmount;
         bool success = i_underlyingToken.transfer(_to, _amount);
         if (!success) {

@@ -29,6 +29,8 @@ contract LendingEngine {
     uint256 private constant MIN_HEALTH_FACTOR = 1e18;
     uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
     uint256 private constant USDC_TO_WAD = 1e12;
+    uint256 private constant MIN_BORROW_AMOUNT = 10e6;
+    uint256 private constant MIN_REPAY_AMOUNT = 1e6;
 
     struct UserPosition {
         uint256 collateral;
@@ -59,6 +61,7 @@ contract LendingEngine {
     //////////////////////////////////////////////////////////////*/
 
     error LendingEngine__NeedsMoreThanZero();
+    error LendingEngine__NeedsMoreThanMinimumAmount();
     error LendingEngine__MaxWithdrawAmountExceeded();
     error LendingEngine__MaxBorrowAmountExceeded();
     error LendingEngine__MaxRepayAmountExceeded();
@@ -79,6 +82,13 @@ contract LendingEngine {
     modifier moreThanZero(uint256 amount) {
         if (amount == 0) {
             revert LendingEngine__NeedsMoreThanZero();
+        }
+        _;
+    }
+
+    modifier moreThanMinimumBorrowAmount(uint256 _amount) {
+        if (_amount < MIN_BORROW_AMOUNT) {
+            revert LendingEngine__NeedsMoreThanMinimumAmount();
         }
         _;
     }
@@ -135,6 +145,10 @@ contract LendingEngine {
      * @param _amount The amount to borrow
      */
     function borrow(uint256 _amount) external moreThanZero(_amount) {
+        if (_amount < MIN_BORROW_AMOUNT) {
+            revert LendingEngine__NeedsMoreThanMinimumAmount();
+        }
+
         uint256 maxBorrowValueUsd = _getMaxBorrowValueUsd(msg.sender);
         uint256 currentDebtValueUsd = _getDebtValueUsd(msg.sender);
         uint256 newDebtValueUsd = currentDebtValueUsd + (_amount * USDC_TO_WAD);
@@ -153,6 +167,9 @@ contract LendingEngine {
      * @param _amount The amount of debt to repay
      */
     function repay(uint256 _amount) external moreThanZero(_amount) {
+        if (_amount < MIN_REPAY_AMOUNT) {
+            revert LendingEngine__NeedsMoreThanMinimumAmount();
+        }
         _repay(msg.sender, msg.sender, _amount);
     }
 
