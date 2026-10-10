@@ -20,6 +20,7 @@ contract Vault is Ownable {
 
     IERC20 public immutable i_underlyingToken;
     IRebaseToken public immutable i_rebaseToken;
+    address public immutable i_feeRecipient;
 
     // Total borrowed debt normalized against the borrow index
     // Actual total debt = totalScaledBorrowed * borrowIndex / WAD
@@ -34,6 +35,8 @@ contract Vault is Ownable {
     uint256 public currentBorrowRate;
     // Current annual yield earned by lenders, in WAD precision
     uint256 public currentSupplyRate;
+
+    uint256 public accruedProtocolReserves;
 
     // Fixed-point precision used for rates, ratios, and indexes
     // 1e18 = 1.0 = 100%
@@ -56,6 +59,7 @@ contract Vault is Ownable {
 
     event Deposit(address indexed user, uint256 amount);
     event Withdraw(address indexed user, uint256 amount);
+    event ProtocolReservesWithdrawn(address indexed user, uint256 amount);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -68,6 +72,8 @@ contract Vault is Ownable {
     error Vault__InvalidAddress();
     error Vault__LendingEngineAlreadySet();
     error Vault__TransferFailed();
+    error Vault__OnlyFeeRecipient();
+    error Vault__InsufficientProtocolReserves();
 
     /*//////////////////////////////////////////////////////////////
                                 MODIFIERS
@@ -102,10 +108,12 @@ contract Vault is Ownable {
      */
     constructor(
         address _underlyingToken,
-        address _rebaseToken
+        address _rebaseToken,
+        address _feeRecipient
     ) Ownable(msg.sender) {
         i_underlyingToken = IERC20(_underlyingToken);
         i_rebaseToken = IRebaseToken(_rebaseToken);
+        i_feeRecipient = _feeRecipient;
 
         lastUpdateTimestamp = block.timestamp;
         currentBorrowRate = BASE_RATE;
@@ -253,6 +261,31 @@ contract Vault is Ownable {
         _accrueInterest();
     }
 
+    function withdrawProtocolReserves(
+        uint256 _amount
+    ) external moreThanZero(_amount) {
+        if (msg.sender != i_feeRecipient) {
+            revert Vault__OnlyFeeRecipient();
+        }
+
+        _accrueInterest();
+
+        if (_amount > accruedProtocolReserves) {
+            revert Vault__InsufficientProtocolReserves();
+        }
+
+        accruedProtocolReserves -= _amount;
+
+        bool success = i_underlyingToken.transfer(i_feeRecipient, _amount);
+        if (!success) {
+            revert Vault__TransferFailed();
+        }
+
+        _updateInterestRates();
+
+        emit ProtocolReservesWithdrawn(i_feeRecipient, _amount);
+    }
+
     /*//////////////////////////////////////////////////////////////
                             PUBLIC FUNCTIONS
     //////////////////////////////////////////////////////////////*/
@@ -342,11 +375,23 @@ contract Vault is Ownable {
         uint256 elapsed = block.timestamp - lastUpdateTimestamp;
         if (elapsed == 0) return;
 
+        uint256 totalBorrowedBefore = (totalScaledBorrowed * borrowIndex) / WAD;
+
         uint256 borrowFactor = WAD + (currentBorrowRate * elapsed) / 365 days;
         uint256 supplyFactor = WAD + (currentSupplyRate * elapsed) / 365 days;
 
         borrowIndex = (borrowIndex * borrowFactor) / WAD;
         liquidityIndex = (liquidityIndex * supplyFactor) / WAD;
+
+        uint256 totalBorrowedAfter = (totalScaledBorrowed * borrowIndex) / WAD;
+
+        uint256 borrowerInterest = totalBorrowedAfter - totalBorrowedBefore;
+        uint256 protocolReserve = Math.mulDiv(
+            borrowerInterest,
+            RESERVE_FACTOR,
+            WAD
+        );
+        accruedProtocolReserves += protocolReserve;
 
         lastUpdateTimestamp = block.timestamp;
 
