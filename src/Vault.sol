@@ -135,7 +135,14 @@ contract Vault is Ownable {
     function deposit(uint256 _amount) external moreThanZero(_amount) {
         _accrueInterest();
 
-        i_underlyingToken.transferFrom(msg.sender, address(this), _amount);
+        bool success = i_underlyingToken.transferFrom(
+            msg.sender,
+            address(this),
+            _amount
+        );
+        if (!success) {
+            revert Vault__TransferFailed();
+        }
         i_rebaseToken.mint(msg.sender, _amount);
 
         _updateInterestRates();
@@ -213,7 +220,14 @@ contract Vault is Ownable {
 
         scaledAmount = (_amount * WAD) / borrowIndex;
         totalScaledBorrowed -= scaledAmount;
-        i_underlyingToken.transferFrom(_payer, address(this), _amount);
+        bool success = i_underlyingToken.transferFrom(
+            _payer,
+            address(this),
+            _amount
+        );
+        if (!success) {
+            revert Vault__TransferFailed();
+        }
 
         _updateInterestRates();
     }
