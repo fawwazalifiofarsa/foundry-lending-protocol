@@ -5,11 +5,13 @@ pragma solidity 0.8.36;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /**
  * @title LendingEngine
  * @author Fawwaz Alifio Farsa
- * @notice A simple lending engine for managing collateral and borrowing
+ * @notice A simple lending engine for managing collateral, borrowing, repayment, and liquidation
+ * @dev Uses a conditional liquidation bonus to keep liquidations health-factor improving. A 10% bonus applies above 110% collateralization, while no bonus is applied between 100% and 110%. Positions at or below 100% collateralization may result in bad debt and are not fully handled by the current liquidation mechanism. Future versions may add bad-debt accounting and a progressively adjusted liquidation bonus.
  */
 contract LendingEngine {
     /*//////////////////////////////////////////////////////////////
@@ -199,12 +201,14 @@ contract LendingEngine {
             revert LendingEngine__HealthFactorOk(startingUserHealthFactor);
         }
 
+        uint256 liquidationBonus = _getLiquidationBonus(_user);
+
         _repay(_user, msg.sender, _debtToCover);
 
         uint256 debtValueUsd = _debtToCover * USDC_TO_WAD;
         uint256 tokenAmountFromDebtCovered = getEthAmountFromUsd(debtValueUsd);
         uint256 bonusCollateral = (tokenAmountFromDebtCovered *
-            LIQUIDATION_BONUS) / LIQUIDATION_PRECISION;
+            liquidationBonus) / LIQUIDATION_PRECISION;
         uint256 totalCollateralToRedeem = tokenAmountFromDebtCovered +
             bonusCollateral;
 
@@ -346,6 +350,49 @@ contract LendingEngine {
         uint256 price = uint256(priceInt);
 
         return uint256(price) * ADDITIONAL_FEED_PRECISION;
+    }
+
+    /**
+     * @notice Returns a user's collateral value relative to their outstanding debt
+     * @dev Returns the maximum uint256 value when the user has no debt
+     * @param _user The address of the user whose collateralization ratio is queried
+     * @return The collateralization ratio expressed in WAD precision
+     */
+    function _getCollateralizationRatio(
+        address _user
+    ) internal view returns (uint256) {
+        uint256 debtValueUsd = _getDebtValueUsd(_user);
+
+        if (debtValueUsd == 0) {
+            return type(uint256).max;
+        }
+
+        uint256 collateralValueUsd = getEthUsdValue(
+            s_positions[_user].collateral
+        );
+
+        return Math.mulDiv(collateralValueUsd, WAD, debtValueUsd);
+    }
+
+    /**
+     * @notice Returns the liquidation bonus applicable to a user's position
+     * @dev Applies the configured bonus only when collateralization exceeds the debt value plus the bonus percentage
+     * @param _user The address of the user whose liquidation bonus is queried
+     * @return The liquidation bonus expressed in LIQUIDATION_PRECISION units
+     */
+    function _getLiquidationBonus(
+        address _user
+    ) internal view returns (uint256) {
+        uint256 collateralizationRatio = _getCollateralizationRatio(_user);
+
+        uint256 minimumCollateralizationForBonus = WAD +
+            Math.mulDiv(LIQUIDATION_BONUS, WAD, LIQUIDATION_PRECISION);
+
+        if (collateralizationRatio > minimumCollateralizationForBonus) {
+            return LIQUIDATION_BONUS;
+        }
+
+        return 0;
     }
 
     /**
