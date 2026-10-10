@@ -29,6 +29,8 @@ contract LendingEngineTest is Test {
     uint256 private constant BORROW_AMOUNT = 10_000e6;
     uint256 private constant MAX_BORROW_AMOUNT = 14_000e6;
     uint256 private constant ADDITIONAL_AMOUNT = 1_000e6;
+    uint256 private constant LIQUIDATION_DEBT_TO_COVER = 4_000e6;
+    int256 private constant UNHEALTHY_ETH_USD_PRICE = 1_600e8;
 
     function setUp() public {
         weth = new ERC20DecimalsMock("Wrapped Ether", "WETH", 18);
@@ -188,8 +190,8 @@ contract LendingEngineTest is Test {
 
     function testWithdrawCollateralEmitsEvent() public collateralDeposited {
         vm.prank(user);
-        vm.expectEmit(true, false, false, true, address(lendingEngine));
-        emit LendingEngine.CollateralWithdrawn(user, 1 ether);
+        vm.expectEmit(true, true, false, true, address(lendingEngine));
+        emit LendingEngine.CollateralRedeemed(user, user, 1 ether);
         lendingEngine.withdrawCollateral(1 ether);
     }
 
@@ -575,6 +577,409 @@ contract LendingEngineTest is Test {
         assertGt(lendingEngine.getHealthFactor(user), healthFactorBefore);
     }
 
+    /*//////////////////////////////////////////////////////////////
+                            LIQUIDATION
+    //////////////////////////////////////////////////////////////*/
+
+    function testLiquidateRevertsWhenDebtToCoverIsZero() public {
+        vm.prank(secondUser);
+        vm.expectRevert(
+            LendingEngine.LendingEngine__NeedsMoreThanZero.selector
+        );
+        lendingEngine.liquidate(user, 0);
+    }
+
+    function testLiquidateRevertsWhenUserHealthFactorIsHealthy()
+        public
+        debtBorrowed
+    {
+        uint256 healthFactor = lendingEngine.getHealthFactor(user);
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+
+        vm.prank(secondUser);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LendingEngine.LendingEngine__HealthFactorOk.selector,
+                healthFactor
+            )
+        );
+        lendingEngine.liquidate(user, LIQUIDATION_DEBT_TO_COVER);
+    }
+
+    function testLiquidateRevertsWhenUserHealthFactorEqualsMinimum()
+        public
+        collateralDeposited
+    {
+        _borrow(user, MAX_BORROW_AMOUNT);
+        priceFeed.updateAnswer(1_750e8);
+        uint256 healthFactor = lendingEngine.getHealthFactor(user);
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+
+        vm.prank(secondUser);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                LendingEngine.LendingEngine__HealthFactorOk.selector,
+                healthFactor
+            )
+        );
+        lendingEngine.liquidate(user, LIQUIDATION_DEBT_TO_COVER);
+    }
+
+    function testLiquidateRevertsWhenDebtToCoverExceedsUserDebt() public {
+        _openUnhealthyPosition();
+        uint256 userDebt = lendingEngine.getDebt(user);
+        _fundLiquidator(userDebt + 1);
+
+        vm.prank(secondUser);
+        vm.expectRevert(
+            LendingEngine.LendingEngine__MaxRepayAmountExceeded.selector
+        );
+        lendingEngine.liquidate(user, userDebt + 1);
+    }
+
+    function testLiquidateRevertsWhenLiquidatorHasInsufficientUsdc() public {
+        _openUnhealthyPosition();
+        vm.prank(secondUser);
+        usdc.approve(address(vault), type(uint256).max);
+
+        vm.prank(secondUser);
+        vm.expectPartialRevert(IERC20Errors.ERC20InsufficientBalance.selector);
+        lendingEngine.liquidate(user, LIQUIDATION_DEBT_TO_COVER);
+    }
+
+    function testLiquidateRevertsWithoutLiquidatorUsdcApproval() public {
+        _openUnhealthyPosition();
+        usdc.mint(secondUser, LIQUIDATION_DEBT_TO_COVER);
+
+        vm.prank(secondUser);
+        usdc.approve(address(vault), 0);
+
+        vm.prank(secondUser);
+        vm.expectPartialRevert(
+            IERC20Errors.ERC20InsufficientAllowance.selector
+        );
+        lendingEngine.liquidate(user, LIQUIDATION_DEBT_TO_COVER);
+    }
+
+    function testLiquidateUnhealthyPositionSucceeds() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+
+        vm.prank(secondUser);
+        lendingEngine.liquidate(user, LIQUIDATION_DEBT_TO_COVER);
+
+        assertEq(
+            lendingEngine.getDebt(user),
+            MAX_BORROW_AMOUNT - LIQUIDATION_DEBT_TO_COVER
+        );
+    }
+
+    function testLiquidationReducesBorrowerDebt() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 debtBefore = lendingEngine.getDebt(user);
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        assertEq(
+            lendingEngine.getDebt(user),
+            debtBefore - LIQUIDATION_DEBT_TO_COVER
+        );
+    }
+
+    function testLiquidationReducesBorrowerScaledDebt() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 scaledDebtBefore = vault.totalScaledBorrowed();
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        assertEq(
+            vault.totalScaledBorrowed(),
+            scaledDebtBefore - LIQUIDATION_DEBT_TO_COVER
+        );
+    }
+
+    function testLiquidationReducesBorrowerCollateral() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 collateralBefore = lendingEngine.getCollateral(user);
+        uint256 collateralToRedeem = _getLiquidationCollateral(
+            LIQUIDATION_DEBT_TO_COVER
+        );
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        assertEq(
+            lendingEngine.getCollateral(user),
+            collateralBefore - collateralToRedeem
+        );
+    }
+
+    function testLiquidationTransfersCollateralToLiquidator() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 balanceBefore = weth.balanceOf(secondUser);
+        uint256 collateralToRedeem = _getLiquidationCollateral(
+            LIQUIDATION_DEBT_TO_COVER
+        );
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        assertEq(
+            weth.balanceOf(secondUser),
+            balanceBefore + collateralToRedeem
+        );
+    }
+
+    function testLiquidationTransfersUsdcFromLiquidatorToVault() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 liquidatorBalanceBefore = usdc.balanceOf(secondUser);
+        uint256 vaultBalanceBefore = usdc.balanceOf(address(vault));
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        assertEq(
+            usdc.balanceOf(secondUser),
+            liquidatorBalanceBefore - LIQUIDATION_DEBT_TO_COVER
+        );
+        assertEq(
+            usdc.balanceOf(address(vault)),
+            vaultBalanceBefore + LIQUIDATION_DEBT_TO_COVER
+        );
+    }
+
+    function testLiquidationIncreasesVaultAvailableLiquidity() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 liquidityBefore = vault.getAvailableLiquidity();
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        assertEq(
+            vault.getAvailableLiquidity(),
+            liquidityBefore + LIQUIDATION_DEBT_TO_COVER
+        );
+    }
+
+    function testLiquidationRedeemsCorrectCollateralEquivalent() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 collateralEquivalent = lendingEngine.getEthAmountFromUsd(
+            LIQUIDATION_DEBT_TO_COVER * 1e12
+        );
+        uint256 collateralBefore = lendingEngine.getCollateral(user);
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        uint256 collateralRedeemed = collateralBefore -
+            lendingEngine.getCollateral(user);
+        assertEq(
+            collateralRedeemed - (collateralEquivalent / 10),
+            collateralEquivalent
+        );
+    }
+
+    function testLiquidationAddsTenPercentCollateralBonus() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 collateralEquivalent = lendingEngine.getEthAmountFromUsd(
+            LIQUIDATION_DEBT_TO_COVER * 1e12
+        );
+        uint256 collateralBefore = lendingEngine.getCollateral(user);
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        uint256 collateralRedeemed = collateralBefore -
+            lendingEngine.getCollateral(user);
+        assertEq(
+            collateralRedeemed - collateralEquivalent,
+            collateralEquivalent / 10
+        );
+    }
+
+    function testLiquidatorReceivesDebtEquivalentPlusBonus() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 balanceBefore = weth.balanceOf(secondUser);
+        uint256 expectedCollateral = _getLiquidationCollateral(
+            LIQUIDATION_DEBT_TO_COVER
+        );
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        assertEq(
+            weth.balanceOf(secondUser) - balanceBefore,
+            expectedCollateral
+        );
+    }
+
+    function testLiquidationImprovesBorrowerHealthFactor() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 healthFactorBefore = lendingEngine.getHealthFactor(user);
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        assertGt(lendingEngine.getHealthFactor(user), healthFactorBefore);
+    }
+
+    function testPartialLiquidationCanLeaveHealthFactorBelowMinimum() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        assertLt(lendingEngine.getHealthFactor(user), 1e18);
+    }
+
+    function testLiquidationRevertsWhenHealthFactorDoesNotImprove() public {
+        _depositCollateral(user, COLLATERAL_AMOUNT);
+        _borrow(user, MAX_BORROW_AMOUNT);
+        priceFeed.updateAnswer(1_500e8);
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+
+        vm.prank(secondUser);
+        vm.expectRevert(
+            LendingEngine.LendingEngine__HealthFactorNotImproved.selector
+        );
+        lendingEngine.liquidate(user, LIQUIDATION_DEBT_TO_COVER);
+    }
+
+    function testLiquidationDoesNotChangeOtherUsersPositions() public {
+        _depositCollateral(secondUser, 2 ether);
+        _borrow(secondUser, ADDITIONAL_AMOUNT);
+        uint256 secondUserCollateralBefore = lendingEngine.getCollateral(
+            secondUser
+        );
+        uint256 secondUserDebtBefore = lendingEngine.getDebt(secondUser);
+        _openUnhealthyPosition();
+        address liquidator = makeAddr("liquidator");
+        _fundLiquidator(liquidator, LIQUIDATION_DEBT_TO_COVER);
+
+        vm.prank(liquidator);
+        lendingEngine.liquidate(user, LIQUIDATION_DEBT_TO_COVER);
+
+        assertEq(
+            lendingEngine.getCollateral(secondUser),
+            secondUserCollateralBefore
+        );
+        assertEq(lendingEngine.getDebt(secondUser), secondUserDebtBefore);
+    }
+
+    function testLiquidationDoesNotChangeBorrowerCollateralMoreThanExpected()
+        public
+    {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 collateralBefore = lendingEngine.getCollateral(user);
+        uint256 expectedCollateral = _getLiquidationCollateral(
+            LIQUIDATION_DEBT_TO_COVER
+        );
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        assertEq(
+            collateralBefore - lendingEngine.getCollateral(user),
+            expectedCollateral
+        );
+    }
+
+    function testLiquidationDoesNotReduceBorrowerDebtMoreThanDebtCovered()
+        public
+    {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 debtBefore = lendingEngine.getDebt(user);
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        assertEq(
+            debtBefore - lendingEngine.getDebt(user),
+            LIQUIDATION_DEBT_TO_COVER
+        );
+    }
+
+    function testLiquidationEmitsCollateralRedeemedEvent() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 collateralToRedeem = _getLiquidationCollateral(
+            LIQUIDATION_DEBT_TO_COVER
+        );
+
+        vm.prank(secondUser);
+        vm.expectEmit(true, true, false, true, address(lendingEngine));
+        emit LendingEngine.CollateralRedeemed(
+            user,
+            secondUser,
+            collateralToRedeem
+        );
+        lendingEngine.liquidate(user, LIQUIDATION_DEBT_TO_COVER);
+    }
+
+    function testLiquidationEmitsLiquidatedEvent() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
+        uint256 collateralToRedeem = _getLiquidationCollateral(
+            LIQUIDATION_DEBT_TO_COVER
+        );
+
+        vm.prank(secondUser);
+        vm.expectEmit(true, true, false, true, address(lendingEngine));
+        emit LendingEngine.Liquidated(
+            user,
+            secondUser,
+            LIQUIDATION_DEBT_TO_COVER,
+            collateralToRedeem
+        );
+        lendingEngine.liquidate(user, LIQUIDATION_DEBT_TO_COVER);
+    }
+
+    function testMultiplePartialLiquidationsCanImprovePosition() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER * 2);
+        uint256 startingHealthFactor = lendingEngine.getHealthFactor(user);
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+        uint256 healthFactorAfterFirstLiquidation = lendingEngine
+            .getHealthFactor(user);
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+        uint256 healthFactorAfterSecondLiquidation = lendingEngine
+            .getHealthFactor(user);
+
+        assertGt(healthFactorAfterFirstLiquidation, startingHealthFactor);
+        assertGt(
+            healthFactorAfterSecondLiquidation,
+            healthFactorAfterFirstLiquidation
+        );
+    }
+
+    function testSecondLiquidationUsesUpdatedDebtAndCollateral() public {
+        _openUnhealthyPosition();
+        _fundLiquidator(LIQUIDATION_DEBT_TO_COVER * 2);
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+        uint256 debtBeforeSecondLiquidation = lendingEngine.getDebt(user);
+        uint256 collateralBeforeSecondLiquidation = lendingEngine.getCollateral(
+            user
+        );
+        uint256 expectedCollateral = _getLiquidationCollateral(
+            LIQUIDATION_DEBT_TO_COVER
+        );
+
+        _liquidate(LIQUIDATION_DEBT_TO_COVER);
+
+        assertEq(
+            lendingEngine.getDebt(user),
+            debtBeforeSecondLiquidation - LIQUIDATION_DEBT_TO_COVER
+        );
+        assertEq(
+            lendingEngine.getCollateral(user),
+            collateralBeforeSecondLiquidation - expectedCollateral
+        );
+    }
+
     function _approveTokens(address account) internal {
         vm.startPrank(account);
         weth.approve(address(lendingEngine), type(uint256).max);
@@ -600,5 +1005,36 @@ contract LendingEngineTest is Test {
     function _repay(address account, uint256 amount) internal {
         vm.prank(account);
         lendingEngine.repay(amount);
+    }
+
+    function _openUnhealthyPosition() internal {
+        _depositCollateral(user, COLLATERAL_AMOUNT);
+        _borrow(user, MAX_BORROW_AMOUNT);
+        priceFeed.updateAnswer(UNHEALTHY_ETH_USD_PRICE);
+    }
+
+    function _fundLiquidator(uint256 amount) internal {
+        _fundLiquidator(secondUser, amount);
+    }
+
+    function _fundLiquidator(address liquidator, uint256 amount) internal {
+        usdc.mint(liquidator, amount);
+        vm.prank(liquidator);
+        usdc.approve(address(vault), type(uint256).max);
+    }
+
+    function _liquidate(uint256 debtToCover) internal {
+        vm.prank(secondUser);
+        lendingEngine.liquidate(user, debtToCover);
+    }
+
+    function _getLiquidationCollateral(
+        uint256 debtToCover
+    ) internal view returns (uint256) {
+        uint256 collateralEquivalent = lendingEngine.getEthAmountFromUsd(
+            debtToCover * 1e12
+        );
+
+        return collateralEquivalent + (collateralEquivalent / 10);
     }
 }
