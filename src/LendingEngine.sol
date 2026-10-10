@@ -22,6 +22,8 @@ contract LendingEngine {
 
     uint256 private constant MAX_LTV = 70e16; // 70%
     uint256 private constant LIQUIDATION_THRESHOLD = 80e16; // 80%
+    uint256 private constant LIQUIDATION_BONUS = 10;
+    uint256 private constant LIQUIDATION_PRECISION = 100;
 
     uint256 private constant WAD = 1e18;
     uint256 private constant MIN_HEALTH_FACTOR = 1e18;
@@ -40,7 +42,17 @@ contract LendingEngine {
     //////////////////////////////////////////////////////////////*/
 
     event CollateralDeposited(address indexed user, uint256 amount);
-    event CollateralWithdrawn(address indexed user, uint256 amount);
+    event CollateralRedeemed(
+        address indexed collateralOwner,
+        address indexed collateralRecipient,
+        uint256 amount
+    );
+    event Liquidated(
+        address indexed user,
+        address indexed liquidator,
+        uint256 debtCovered,
+        uint256 collaterealRedeemed
+    );
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -53,6 +65,8 @@ contract LendingEngine {
     error LendingEngine__InsufficientCollateral();
     error LendingEngine__TransferFailed();
     error LendingEngine__HealthFactorBroken();
+    error LendingEngine__HealthFactorOk(uint256 healthFactor);
+    error LendingEngine__HealthFactorNotImproved();
 
     /*//////////////////////////////////////////////////////////////
                                 MODIFIERS
@@ -110,16 +124,9 @@ contract LendingEngine {
             revert LendingEngine__MaxWithdrawAmountExceeded();
         }
 
-        s_positions[msg.sender].collateral -= _amount;
+        _redeemCollateral(msg.sender, msg.sender, _amount);
 
         _revertIfHealthFactorBroken(msg.sender);
-
-        bool success = i_weth.transfer(msg.sender, _amount);
-        if (!success) {
-            revert LendingEngine__TransferFailed();
-        }
-
-        emit CollateralWithdrawn(msg.sender, _amount);
     }
 
     /**
@@ -146,15 +153,7 @@ contract LendingEngine {
      * @param _amount The amount of debt to repay
      */
     function repay(uint256 _amount) external moreThanZero(_amount) {
-        uint256 userDebt = getDebt(msg.sender);
-
-        if (_amount > userDebt) {
-            revert LendingEngine__MaxRepayAmountExceeded();
-        }
-
-        uint256 scaledAmount = i_usdcVault.repay(msg.sender, _amount);
-
-        s_positions[msg.sender].scaledDebt -= scaledAmount;
+        _repay(msg.sender, msg.sender, _amount);
     }
 
     /**
@@ -164,6 +163,47 @@ contract LendingEngine {
      */
     function getCollateral(address user) external view returns (uint256) {
         return s_positions[user].collateral;
+    }
+
+    /**
+     * @notice Liquidates part of an unhealthy borrower's debt in exchange for collateral plus a liquidation bonus
+     * @dev The target user's health factor must be below the minimum health factor before liquidation.
+     * The liquidation must improve the user's health factor, although it is not required to restore it above the minimum threshold.
+     * This allows partial liquidations while preventing liquidations that would further worsen an already unhealthy position.
+     * @param _user The address of the borrower being liquidated
+     * @param _debtToCover The amount of the borrower's USDC debt to repay
+     */
+    function liquidate(
+        address _user,
+        uint256 _debtToCover
+    ) external moreThanZero(_debtToCover) {
+        uint256 startingUserHealthFactor = getHealthFactor(_user);
+        if (startingUserHealthFactor >= MIN_HEALTH_FACTOR) {
+            revert LendingEngine__HealthFactorOk(startingUserHealthFactor);
+        }
+
+        _repay(_user, msg.sender, _debtToCover);
+
+        uint256 debtValueUsd = _debtToCover * USDC_TO_WAD;
+        uint256 tokenAmountFromDebtCovered = getEthAmountFromUsd(debtValueUsd);
+        uint256 bonusCollateral = (tokenAmountFromDebtCovered *
+            LIQUIDATION_BONUS) / LIQUIDATION_PRECISION;
+        uint256 totalCollateralToRedeem = tokenAmountFromDebtCovered +
+            bonusCollateral;
+
+        _redeemCollateral(_user, msg.sender, totalCollateralToRedeem);
+
+        uint256 endingUserHealthFactor = getHealthFactor(_user);
+        if (endingUserHealthFactor <= startingUserHealthFactor) {
+            revert LendingEngine__HealthFactorNotImproved();
+        }
+
+        emit Liquidated(
+            _user,
+            msg.sender,
+            _debtToCover,
+            totalCollateralToRedeem
+        );
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -187,10 +227,9 @@ contract LendingEngine {
      * @return The USD value
      */
     function getEthUsdValue(uint256 _amount) public view returns (uint256) {
-        (, int256 priceInt, , , ) = i_ethUsdPriceFeed.latestRoundData();
-        uint256 price = uint256(priceInt);
+        uint256 price = _getEthPrice();
 
-        return ((uint256(price) * ADDITIONAL_FEED_PRECISION) * _amount) / WAD;
+        return (price * _amount) / WAD;
     }
 
     /**
@@ -206,6 +245,19 @@ contract LendingEngine {
         uint256 debtValueUsd = getDebt(_user) * USDC_TO_WAD;
 
         return _calculateHealthFactor(collateralValueUsd, debtValueUsd);
+    }
+
+    /**
+     * @notice Converts a USD-denominated WAD amount into its equivalent ETH amount
+     * @param _usdAmountWad The USD amount expressed with 18 decimals
+     * @return The equivalent ETH amount expressed with 18 decimals
+     */
+    function getEthAmountFromUsd(
+        uint256 _usdAmountWad
+    ) public view returns (uint256) {
+        uint256 price = _getEthPrice();
+
+        return (_usdAmountWad * WAD) / price;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -266,5 +318,69 @@ contract LendingEngine {
         if (healthFactor < MIN_HEALTH_FACTOR) {
             revert LendingEngine__HealthFactorBroken();
         }
+    }
+
+    /**
+     * @notice Returns the latest ETH/USD price normalized to WAD precision
+     * @return The ETH/USD price expressed with 18 decimals
+     */
+    function _getEthPrice() internal view returns (uint256) {
+        (, int256 priceInt, , , ) = i_ethUsdPriceFeed.latestRoundData();
+        uint256 price = uint256(priceInt);
+
+        return uint256(price) * ADDITIONAL_FEED_PRECISION;
+    }
+
+    /**
+     * @notice Redeems collateral from one user's position and transfers it to a recipient
+     * @dev Reverts if the requested amount exceeds the collateral owner's balance or the transfer fails
+     * @param _collateralOwner The user whose collateral balance is reduced
+     * @param _collateralRecipient The address receiving the collateral
+     * @param _amount The amount of collateral to redeem
+     */
+    function _redeemCollateral(
+        address _collateralOwner,
+        address _collateralRecipient,
+        uint256 _amount
+    ) private {
+        if (_amount > s_positions[_collateralOwner].collateral) {
+            revert LendingEngine__InsufficientCollateral();
+        }
+
+        s_positions[_collateralOwner].collateral -= _amount;
+
+        bool success = i_weth.transfer(_collateralRecipient, _amount);
+        if (!success) {
+            revert LendingEngine__TransferFailed();
+        }
+
+        emit CollateralRedeemed(
+            _collateralOwner,
+            _collateralRecipient,
+            _amount
+        );
+    }
+
+    /**
+     * @notice Repays debt for a borrower using funds supplied by a payer
+     * @dev Reverts if the repayment amount exceeds the borrower's current debt
+     * @param _debtOwner The borrower whose debt is reduced
+     * @param _debtPayer The address supplying the repayment funds
+     * @param _amount The amount of USDC debt to repay
+     */
+    function _repay(
+        address _debtOwner,
+        address _debtPayer,
+        uint256 _amount
+    ) private {
+        uint256 userDebt = getDebt(_debtOwner);
+
+        if (_amount > userDebt) {
+            revert LendingEngine__MaxRepayAmountExceeded();
+        }
+
+        uint256 scaledAmount = i_usdcVault.repay(_debtPayer, _amount);
+
+        s_positions[_debtOwner].scaledDebt -= scaledAmount;
     }
 }
