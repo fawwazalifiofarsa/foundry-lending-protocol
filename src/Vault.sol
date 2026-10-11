@@ -12,6 +12,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
  * @author Fawwaz Alifio Farsa
  * @notice Manages lender liquidity for a single underlying asset and tracks interest generated from borrowing activity
  * @dev Accepts underlying token deposits, mints and burns the corresponding RebaseToken, tracks utilization, and maintains borrow and liquidity indexes for interest accrual.
+ * @dev Protocol reserves represent accounting claims on the underlying assets held in the shared liquidity pool and are not held separately. Consequently, the fee recipient may be unable to withdraw accrued reserves when the pool has insufficient available liquidity.
  */
 contract Vault is Ownable {
     /*//////////////////////////////////////////////////////////////
