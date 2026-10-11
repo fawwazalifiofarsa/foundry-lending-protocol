@@ -6,6 +6,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IVault} from "./interfaces/IVault.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {OracleLib} from "./libraries/OracleLib.sol";
 
 /**
  * @title LendingEngine
@@ -14,6 +15,8 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
  * @dev Uses a conditional liquidation bonus to keep liquidations health-factor improving. A 10% bonus applies above 110% collateralization, while no bonus is applied between 100% and 110%. Positions at or below 100% collateralization may result in bad debt and are not fully handled by the current liquidation mechanism. Future versions may add bad-debt accounting and a progressively adjusted liquidation bonus.
  */
 contract LendingEngine {
+    using OracleLib for AggregatorV3Interface;
+
     /*//////////////////////////////////////////////////////////////
                             STATE VARIABLES
     //////////////////////////////////////////////////////////////*/
@@ -357,7 +360,8 @@ contract LendingEngine {
      * @return The ETH/USD price expressed with 18 decimals
      */
     function _getEthPrice() internal view returns (uint256) {
-        (, int256 priceInt, , , ) = i_ethUsdPriceFeed.latestRoundData();
+        (, int256 priceInt, , , ) = i_ethUsdPriceFeed
+            .staleCheckLatestRoundData();
         uint256 price = uint256(priceInt);
 
         return uint256(price) * ADDITIONAL_FEED_PRECISION;

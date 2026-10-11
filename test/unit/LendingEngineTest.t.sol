@@ -348,6 +348,7 @@ contract LendingEngineTest is Test {
     {
         _borrow(user, BORROW_AMOUNT);
         vm.warp(block.timestamp + 365 days);
+        priceFeed.updateAnswer(ETH_USD_PRICE);
         uint256 debtBefore = lendingEngine.getDebt(user);
         _borrow(user, ADDITIONAL_AMOUNT);
         assertApproxEqAbs(
@@ -363,6 +364,7 @@ contract LendingEngineTest is Test {
     {
         _borrow(user, MAX_BORROW_AMOUNT - 100e6);
         vm.warp(block.timestamp + 365 days);
+        priceFeed.updateAnswer(ETH_USD_PRICE);
         vm.prank(user);
         vm.expectRevert(
             LendingEngine.LendingEngine__MaxBorrowAmountExceeded.selector
@@ -612,6 +614,7 @@ contract LendingEngineTest is Test {
     function testHealthFactorDecreasesAsInterestAccrues() public debtBorrowed {
         uint256 healthFactorBefore = lendingEngine.getHealthFactor(user);
         vm.warp(block.timestamp + 365 days);
+        priceFeed.updateAnswer(ETH_USD_PRICE);
         assertLt(lendingEngine.getHealthFactor(user), healthFactorBefore);
     }
 
