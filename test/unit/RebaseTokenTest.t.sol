@@ -21,7 +21,11 @@ contract RebaseTokenTest is Test {
     function setUp() public {
         usdc = new ERC20DecimalsMock("USD Coin", "USDC", 6);
         rebaseToken = new RebaseToken("Rebase USDC", "rUSDC");
-        vault = new Vault(address(usdc), address(rebaseToken));
+        vault = new Vault(
+            address(usdc),
+            address(rebaseToken),
+            makeAddr("feeRecipient")
+        );
 
         rebaseToken.transferOwnership(address(vault));
     }

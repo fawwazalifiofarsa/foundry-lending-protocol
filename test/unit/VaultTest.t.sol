@@ -22,16 +22,23 @@ contract VaultTest is Test {
     uint256 constant DEPOSIT_AMOUNT = 8_000e6;
     uint256 constant ADDITIONAL_AMOUNT = 1_000e6;
     uint256 constant BORROW_AMOUNT = 2_000e6;
+    uint256 constant EXPECTED_PROTOCOL_RESERVES = 9e6;
+    uint256 constant PROTOCOL_RESERVE_WITHDRAWAL = 3e6;
     uint256 constant WAD = 1e18;
 
     address lender = makeAddr("lender");
     address borrower = makeAddr("borrower");
     address lendingEngine = makeAddr("lendingEngine");
+    address feeRecipient = makeAddr("feeRecipient");
 
     function setUp() public {
         usdc = new ERC20DecimalsMock("USD Coin", "USDC", 6);
         rebaseToken = new RebaseToken("Rebase USDC", "rUSDC");
-        vault = new Vault(address(usdc), address(rebaseToken));
+        vault = new Vault(
+            address(usdc),
+            address(rebaseToken),
+            feeRecipient
+        );
 
         rebaseToken.transferOwnership(address(vault));
 
@@ -48,6 +55,10 @@ contract VaultTest is Test {
     function testGetRebaseTokenAddressReturnsCorrectAddress() public view {
         address vaultRebaseToken = vault.getRebaseTokenAddress();
         assertEq(vaultRebaseToken, address(rebaseToken));
+    }
+
+    function testFeeRecipientIsSetDuringDeployment() public view {
+        assertEq(vault.i_feeRecipient(), feeRecipient);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -631,6 +642,96 @@ contract VaultTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                        PROTOCOL RESERVES
+    //////////////////////////////////////////////////////////////*/
+
+    function testInterestAccrualIncreasesProtocolReserves()
+        public
+        depositToVault
+    {
+        _accrueProtocolReservesForOneYear();
+
+        assertEq(
+            vault.accruedProtocolReserves(),
+            EXPECTED_PROTOCOL_RESERVES
+        );
+    }
+
+    function testWithdrawProtocolReservesRevertsWhenAmountIsZero() public {
+        vm.prank(feeRecipient);
+        vm.expectRevert(Vault.Vault__NeedsMoreThanZero.selector);
+        vault.withdrawProtocolReserves(0);
+    }
+
+    function testWithdrawProtocolReservesRevertsWhenCallerIsNotFeeRecipient()
+        public
+        depositToVault
+    {
+        _accrueProtocolReservesForOneYear();
+
+        vm.prank(lender);
+        vm.expectRevert(Vault.Vault__OnlyFeeRecipient.selector);
+        vault.withdrawProtocolReserves(EXPECTED_PROTOCOL_RESERVES);
+    }
+
+    function testWithdrawProtocolReservesRevertsWhenAmountExceedsReserves()
+        public
+        depositToVault
+    {
+        _accrueProtocolReservesForOneYear();
+
+        vm.prank(feeRecipient);
+        vm.expectRevert(Vault.Vault__InsufficientProtocolReserves.selector);
+        vault.withdrawProtocolReserves(EXPECTED_PROTOCOL_RESERVES + 1);
+    }
+
+    function testWithdrawProtocolReservesTransfersUnderlyingToFeeRecipient()
+        public
+        depositToVault
+    {
+        _accrueProtocolReservesForOneYear();
+        uint256 feeRecipientBalanceBefore = usdc.balanceOf(feeRecipient);
+
+        vm.prank(feeRecipient);
+        vault.withdrawProtocolReserves(EXPECTED_PROTOCOL_RESERVES);
+
+        assertEq(
+            usdc.balanceOf(feeRecipient),
+            feeRecipientBalanceBefore + EXPECTED_PROTOCOL_RESERVES
+        );
+    }
+
+    function testWithdrawProtocolReservesDecreasesAccruedReserves()
+        public
+        depositToVault
+    {
+        _accrueProtocolReservesForOneYear();
+
+        vm.prank(feeRecipient);
+        vault.withdrawProtocolReserves(PROTOCOL_RESERVE_WITHDRAWAL);
+
+        assertEq(
+            vault.accruedProtocolReserves(),
+            EXPECTED_PROTOCOL_RESERVES - PROTOCOL_RESERVE_WITHDRAWAL
+        );
+    }
+
+    function testWithdrawProtocolReservesEmitsEvent()
+        public
+        depositToVault
+    {
+        _accrueProtocolReservesForOneYear();
+
+        vm.prank(feeRecipient);
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit Vault.ProtocolReservesWithdrawn(
+            feeRecipient,
+            EXPECTED_PROTOCOL_RESERVES
+        );
+        vault.withdrawProtocolReserves(EXPECTED_PROTOCOL_RESERVES);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                             SUPPLY INTEREST
     //////////////////////////////////////////////////////////////*/
 
@@ -763,5 +864,11 @@ contract VaultTest is Test {
     function _accrueInterest() internal {
         vm.prank(lendingEngine);
         vault.accrueInterest();
+    }
+
+    function _accrueProtocolReservesForOneYear() internal {
+        _setLendingEngineAndBorrow(BORROW_AMOUNT);
+        vm.warp(block.timestamp + 365 days);
+        _accrueInterest();
     }
 }

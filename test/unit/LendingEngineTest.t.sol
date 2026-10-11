@@ -36,7 +36,11 @@ contract LendingEngineTest is Test {
         weth = new ERC20DecimalsMock("Wrapped Ether", "WETH", 18);
         usdc = new ERC20DecimalsMock("USD Coin", "USDC", 6);
         rebaseToken = new RebaseToken("Rebase USDC", "rUSDC");
-        vault = new Vault(address(usdc), address(rebaseToken));
+        vault = new Vault(
+            address(usdc),
+            address(rebaseToken),
+            makeAddr("feeRecipient")
+        );
         priceFeed = new MockV3Aggregator(8, ETH_USD_PRICE);
         lendingEngine = new LendingEngine(
             address(weth),
@@ -280,7 +284,7 @@ contract LendingEngineTest is Test {
         vm.expectRevert(
             LendingEngine.LendingEngine__MaxBorrowAmountExceeded.selector
         );
-        lendingEngine.borrow(1e6);
+        lendingEngine.borrow(10e6);
     }
 
     function testUserCanBorrowBelowMaxLtv() public collateralDeposited {
@@ -362,7 +366,7 @@ contract LendingEngineTest is Test {
         vm.expectRevert(
             LendingEngine.LendingEngine__MaxBorrowAmountExceeded.selector
         );
-        lendingEngine.borrow(1e6);
+        lendingEngine.borrow(10e6);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -497,7 +501,7 @@ contract LendingEngineTest is Test {
         vm.expectRevert(
             LendingEngine.LendingEngine__MaxBorrowAmountExceeded.selector
         );
-        lendingEngine.borrow(1);
+        lendingEngine.borrow(10e6);
     }
 
     function testMaxBorrowValueChangesWhenEthPriceChanges() public {
@@ -508,7 +512,7 @@ contract LendingEngineTest is Test {
         vm.expectRevert(
             LendingEngine.LendingEngine__MaxBorrowAmountExceeded.selector
         );
-        lendingEngine.borrow(1);
+        lendingEngine.borrow(10e6);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -837,7 +841,7 @@ contract LendingEngineTest is Test {
     function testLiquidationRevertsWhenHealthFactorDoesNotImprove() public {
         _depositCollateral(user, COLLATERAL_AMOUNT);
         _borrow(user, MAX_BORROW_AMOUNT);
-        priceFeed.updateAnswer(1_500e8);
+        priceFeed.updateAnswer(1_400e8);
         _fundLiquidator(LIQUIDATION_DEBT_TO_COVER);
 
         vm.prank(secondUser);
