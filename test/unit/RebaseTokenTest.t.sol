@@ -61,7 +61,18 @@ contract RebaseTokenTest is Test {
         assertEq(userRebaseTokenAmount, INITIAL_AMOUNT);
     }
 
-    function testMintAtHigherLiquidityIndexDoesNotGivePastInterest() public {}
+    function testMintAtHigherLiquidityIndexDoesNotGivePastInterest() public {
+        vm.startPrank(address(vault));
+        rebaseToken.setLiquidityIndex(2e18);
+        rebaseToken.mint(user, INITIAL_AMOUNT);
+        vm.stopPrank();
+
+        uint256 userScaledBalance = rebaseToken.scaledBalanceOf(user);
+        uint256 userRebasedBalance = rebaseToken.balanceOf(user);
+
+        assertEq(userScaledBalance, INITIAL_AMOUNT / 2);
+        assertEq(userRebasedBalance, INITIAL_AMOUNT);
+    }
 
     function testBalanceOfAppliesLiquidityIndex() public {
         vm.startPrank(address(vault));
