@@ -5,6 +5,7 @@ pragma solidity 0.8.36;
 import {Test} from "forge-std/Test.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {MockV3Aggregator} from "@chainlink/contracts/src/v0.8/shared/mocks/MockV3Aggregator.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ERC20DecimalsMock} from "test/mocks/ERC20DecimalsMock.sol";
 import {LendingEngine} from "src/LendingEngine.sol";
 import {RebaseToken} from "src/RebaseToken.sol";
@@ -389,6 +390,41 @@ contract LendingEngineTest is Test {
         lendingEngine.repay(BORROW_AMOUNT + 1);
     }
 
+    function testRepayRevertsWhenPartialAmountIsBelowMinimum()
+        public
+        debtBorrowed
+    {
+        vm.prank(user);
+        vm.expectRevert(
+            LendingEngine.LendingEngine__NeedsMoreThanMinimumAmount.selector
+        );
+        lendingEngine.repay(1e6 - 1);
+    }
+
+    function testRepayAllowsFullDebtBelowMinimum() public debtBorrowed {
+        uint256 remainingDebt = 500_000;
+        _repay(user, BORROW_AMOUNT - remainingDebt);
+
+        assertEq(lendingEngine.getDebt(user), remainingDebt);
+
+        _repay(user, remainingDebt);
+
+        assertEq(lendingEngine.getDebt(user), 0);
+        assertEq(vault.totalScaledBorrowed(), 0);
+    }
+
+    function testFullRepayAfterInterestClearsScaledDebt() public debtBorrowed {
+        vm.warp(block.timestamp + 180 days);
+        uint256 userDebt = lendingEngine.getDebt(user);
+        uint256 userBalance = usdc.balanceOf(user);
+        usdc.mint(user, userDebt - userBalance);
+
+        _repay(user, userDebt);
+
+        assertEq(lendingEngine.getDebt(user), 0);
+        assertEq(vault.totalScaledBorrowed(), 0);
+    }
+
     function testRepayTransfersUsdcBackToVault() public debtBorrowed {
         uint256 vaultBalanceBefore = usdc.balanceOf(address(vault));
         _repay(user, ADDITIONAL_AMOUNT);
@@ -469,8 +505,12 @@ contract LendingEngineTest is Test {
 
     function testGetDebtUsesPreviewBorrowIndex() public debtBorrowed {
         vm.warp(block.timestamp + 180 days);
-        uint256 expectedDebt = (vault.totalScaledBorrowed() *
-            vault.previewBorrowIndex()) / 1e18;
+        uint256 expectedDebt = Math.mulDiv(
+            vault.totalScaledBorrowed(),
+            vault.previewBorrowIndex(),
+            1e18,
+            Math.Rounding.Ceil
+        );
         assertEq(lendingEngine.getDebt(user), expectedDebt);
     }
 

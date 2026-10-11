@@ -169,9 +169,16 @@ contract LendingEngine {
      * @param _amount The amount of debt to repay
      */
     function repay(uint256 _amount) external moreThanZero(_amount) {
-        if (_amount < MIN_REPAY_AMOUNT) {
+        uint256 userDebt = getDebt(msg.sender);
+
+        if (_amount > userDebt) {
+            revert LendingEngine__MaxRepayAmountExceeded();
+        }
+
+        if (_amount < MIN_REPAY_AMOUNT && _amount != userDebt) {
             revert LendingEngine__NeedsMoreThanMinimumAmount();
         }
+
         _repay(msg.sender, msg.sender, _amount);
     }
 
@@ -238,8 +245,12 @@ contract LendingEngine {
      */
     function getDebt(address _user) public view returns (uint256) {
         return
-            (s_positions[_user].scaledDebt * i_usdcVault.previewBorrowIndex()) /
-            WAD;
+            Math.mulDiv(
+                s_positions[_user].scaledDebt,
+                i_usdcVault.previewBorrowIndex(),
+                WAD,
+                Math.Rounding.Ceil
+            );
     }
 
     /**
